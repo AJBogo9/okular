@@ -321,6 +321,24 @@
     <min>5</min>
     <max>100</max>
   </entry>
+  <entry key="ScrollLodFactor" type="Int" >
+   <label>Render pages at 1/N of their size while scrolling fast. 1 disables.</label>
+   <default>4</default>
+    <min>1</min>
+    <max>16</max>
+  </entry>
+  <entry key="ScrollLodEngageVelocity" type="Int" >
+   <label>Scroll speed, in pixels per second, above which reduced resolution is used.</label>
+   <default>2000</default>
+    <min>1</min>
+  </entry>
+  <entry key="ScrollLodReleaseVelocity" type="Int" >
+   <label>Scroll speed, in pixels per second, below which full resolution returns.</label>
+   <default>1200</default>
+    <min>1</min>
+  </entry>
+  <entry key="ScrollLodSettleMs" type="Int" >
+   <label>Delay before re-rendering at full resolution once scrolling slows.</label>
    <default>150</default>
     <min>0</min>
     <max>2000</max>
