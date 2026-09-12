@@ -1,0 +1,15 @@
+{
+    // Group the cluttered repository root in the Explorer without moving any
+    // file on disk: each key stays visible, its children collapse under it.
+    "explorer.fileNesting.enabled": true,
+    "explorer.fileNesting.expand": false,
+    "explorer.fileNesting.patterns": {
+        "_clang-format": "README.clang-format, .clang-tidy, .krazy, cppcheck-suppressions.xml, okular-cppcheck.xml",
+        "CMakeLists.txt": "OkularConfigureChecks.cmake, config-okular.h.cmake, Okular6Config.cmake.in",
+        ".flatpak-manifest.json": "*.patch",
+        ".gitignore": ".git-blame-ignore-revs",
+        ".gitlab-ci.yml": ".kde-ci.yml, .craft.ini",
+        "metainfo.yaml": "okular.categories, okular_part.json",
+        "README.md": "README.internals.png, Mainpage.dox, TODO"
+    }
+}
