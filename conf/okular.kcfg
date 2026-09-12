@@ -323,7 +323,9 @@
   </entry>
   <entry key="ScrollLodFactor" type="Int" >
    <label>Render pages at 1/N of their size while scrolling fast. 1 disables.</label>
-   <default>4</default>
+   <!-- Off by default: this engages correctly but its user-visible benefit has
+        never been demonstrated, so it should not be on in a fresh profile. -->
+   <default>1</default>
     <min>1</min>
     <max>16</max>
   </entry>
