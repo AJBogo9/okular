@@ -315,6 +315,16 @@
   <entry key="SmoothScrolling" type="Bool" >
    <default>true</default>
   </entry>
+  <entry key="SmoothScrollResponse" type="Int" >
+   <label>Percent of the remaining scroll distance to cover each frame. Lower is smoother but laggier.</label>
+   <default>35</default>
+    <min>5</min>
+    <max>100</max>
+  </entry>
+   <default>150</default>
+    <min>0</min>
+    <max>2000</max>
+  </entry>
   <entry key="ShowScrollBars" type="Bool" >
    <default>true</default>
   </entry>
