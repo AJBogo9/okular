@@ -166,6 +166,11 @@ public:
     void saveDocumentInfo() const;
     void slotTimedMemoryCheck();
     void sendGeneratorPixmapRequest();
+    // Picks and dispatches a single request. Returns true when one was actually
+    // handed to the generator, so the caller knows to try for another.
+    // priorityBound limits which requests may go out in the same drain; see
+    // sendGeneratorPixmapRequest().
+    bool dispatchPixmapRequest(int *priorityBound, int maxInFlight);
     void rotationFinished(int page, Okular::Page *okularPage);
     void slotFontReadingProgress(int page);
     void fontReadingGotFont(const Okular::FontInfo &font);
@@ -259,6 +264,16 @@ public:
     std::list<PixmapRequest *> m_pixmapRequestsStack;
     std::list<PixmapRequest *> m_executingPixmapRequests;
     QMutex m_pixmapRequestsMutex;
+    // Guards against sendGeneratorPixmapRequest() re-entering itself through a
+    // synchronous requestDone(); the outer loop keeps draining instead.
+    bool m_dispatchingPixmapRequests = false;
+    // Rolling feedback on whether finished renders are being used or thrown away.
+    // While the viewport outruns the renderer, as during a fast scroll, requests
+    // are abandoned about as fast as they start; filling every render slot then
+    // multiplies the wasted work instead of the throughput. Counts are halved
+    // periodically so this tracks recent behaviour rather than the whole session.
+    int m_rendersCompleted = 0;
+    int m_rendersAbandoned = 0;
     std::list<AllocatedPixmap *> m_allocatedPixmaps;
     qulonglong m_allocatedPixmapsTotalMemory;
     QList<int> m_allocatedTextPagesFifo;

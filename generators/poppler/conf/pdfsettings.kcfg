@@ -17,6 +17,13 @@
                 <choice name="Shape" />
             </choices>
         </entry>
+        <entry key="RenderThreads" type="Int">
+            <label>How many pages may be rasterised at the same time</label>
+            <whatsthis>Each extra thread renders from its own copy of the document, which costs memory. 1 disables parallel rendering.</whatsthis>
+            <default>4</default>
+            <min>1</min>
+            <max>16</max>
+        </entry>
         <entry key="OverprintPreviewEnabled" type="Enum">
             <default>Automatic</default>
             <choices>

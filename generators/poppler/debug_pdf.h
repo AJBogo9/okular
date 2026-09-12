@@ -11,4 +11,11 @@
 
 Q_DECLARE_LOGGING_CATEGORY(OkularPdfDebug)
 
+/**
+ * One line per rasterisation, carrying the render slot and whether the render
+ * completed or was abandoned. Off by default; enable with
+ * QT_LOGGING_RULES="org.kde.okular.rendertrace.debug=true".
+ */
+Q_DECLARE_LOGGING_CATEGORY(OkularRenderTrace)
+
 #endif

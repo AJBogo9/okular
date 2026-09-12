@@ -1321,7 +1321,45 @@ void DocumentPrivate::slotTimedMemoryCheck()
     }
 }
 
+// Two requests are interchangeable when they would put the same pixels in the
+// same place for the same observer.
+static bool samePixmapRequest(const PixmapRequest *a, const PixmapRequest *b)
+{
+    return a->observer() == b->observer() && a->pageNumber() == b->pageNumber() && a->width() == b->width() && a->height() == b->height() && a->isTile() == b->isTile() && a->normalizedRect() == b->normalizedRect();
+}
+
 void DocumentPrivate::sendGeneratorPixmapRequest()
+{
+    // A generator that can rasterise several requests at once (see
+    // Generator::maxConcurrentRenders) wants every free slot filled, not just one.
+    // For a single-slot generator, which is every backend unless it opts in, this
+    // loop runs at most once and behaves exactly as it always did.
+    if (m_dispatchingPixmapRequests) {
+        return;
+    }
+    m_dispatchingPixmapRequests = true;
+    // Fill the free slots only with work of the same priority as the first
+    // request that goes out. Pages the user is looking at then rasterise
+    // alongside each other, while speculative preloads never take cores away
+    // from them; the preloads get the whole generator once the visible work is
+    // done. Without this, a jump to a page is measurably slower with several
+    // slots than with one, because the page being waited for has to share the
+    // machine with pages nobody has asked to see yet.
+    int priorityBound = INT_MAX;
+    // Back off to a single render in flight while most of them are being
+    // abandoned: running several speculative renders against a viewport that has
+    // already moved on costs cores without putting anything on screen. This caps
+    // concurrency rather than dispatches per drain, because every completion
+    // re-arms the drain and would otherwise refill the slots one at a time.
+    // A third of renders going to waste already means the viewport is moving
+    // faster than the renderer can follow; waiting for a majority leaves most of
+    // the wasted work in place.
+    const int maxInFlight = (m_rendersAbandoned * 2 > m_rendersCompleted) ? 1 : INT_MAX;
+    while (dispatchPixmapRequest(&priorityBound, maxInFlight)) { }
+    m_dispatchingPixmapRequests = false;
+}
+
+bool DocumentPrivate::dispatchPixmapRequest(int *priorityBound, int maxInFlight)
 {
     /* If the pixmap cache will have to be cleaned in order to make room for the
      * next request, get the distance from the current viewport of the page
@@ -1372,6 +1410,14 @@ void DocumentPrivate::sendGeneratorPixmapRequest()
         }
         // request only if page isn't already present and request has valid id
         else if ((!r->d->mForce && r->page()->hasPixmap(r->observer(), r->width(), r->height(), r->normalizedRect())) || !m_observers.contains(r->observer())) {
+            m_pixmapRequestsStack.pop_back();
+            delete r;
+        }
+        // Ignore a request for something that is already being rendered. The
+        // hasPixmap() check above only sees finished renders, so with several in
+        // flight at once the same page would otherwise be rasterised once per
+        // free slot.
+        else if (!r->d->mForce && std::ranges::any_of(m_executingPixmapRequests, [r](const PixmapRequest *executing) { return samePixmapRequest(r, executing); })) {
             m_pixmapRequestsStack.pop_back();
             delete r;
         } else if (!r->d->mForce && r->preload() && qAbs(r->pageNumber() - currentViewportPage) >= maxDistance) {
@@ -1453,8 +1499,21 @@ void DocumentPrivate::sendGeneratorPixmapRequest()
     // if no request found (or already generated), return
     if (!request) {
         m_pixmapRequestsMutex.unlock();
-        return;
+        return false;
     }
+
+    // The stack is priority-ordered, so once a request worse than the bound comes
+    // up, everything at least as urgent is already in flight. Leave it queued: it
+    // will go out when a slot frees, rather than competing for cores now.
+    if (request->priority() > *priorityBound) {
+        m_pixmapRequestsMutex.unlock();
+        return false;
+    }
+    if (int(m_executingPixmapRequests.size()) >= maxInFlight) {
+        m_pixmapRequestsMutex.unlock();
+        return false;
+    }
+    *priorityBound = request->priority();
 
     // [MEM] preventive memory freeing
     qulonglong pixmapBytes = 0;
@@ -1499,10 +1558,12 @@ void DocumentPrivate::sendGeneratorPixmapRequest()
         m_executingPixmapRequests.push_back(request);
         m_pixmapRequestsMutex.unlock();
         m_generator->generatePixmap(request);
+        return true;
     } else {
         m_pixmapRequestsMutex.unlock();
         // pino (7/4/2006): set the polling interval from 10 to 30
         QTimer::singleShot(30, m_parent, [this] { sendGeneratorPixmapRequest(); });
+        return false;
     }
 }
 
@@ -5520,6 +5581,16 @@ void DocumentPrivate::requestDone(PixmapRequest *req)
         qCDebug(OkularCoreDebug) << "requestDone with generator not in READY state.";
     }
 #endif
+
+    if (req->shouldAbortRender()) {
+        ++m_rendersAbandoned;
+    } else {
+        ++m_rendersCompleted;
+    }
+    if (m_rendersCompleted + m_rendersAbandoned >= 32) {
+        m_rendersCompleted /= 2;
+        m_rendersAbandoned /= 2;
+    }
 
     if (!req->shouldAbortRender()) {
         // [MEM] 1.1 find and remove a previous entry for the same page and id
