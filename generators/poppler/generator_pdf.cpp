@@ -20,6 +20,7 @@
 #include <QComboBox>
 #include <QDebug>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QImage>
 #include <QImageReader>
@@ -798,13 +799,29 @@ Okular::Document::OpenResult PDFGenerator::init(QList<Okular::Page *> &pagesVect
     reparseConfig();
 
     // create annotation proxy
-    annotProxy = new PopplerAnnotationProxy(pdfdoc.get(), userMutex(), &annotationsOnOpenHash);
+    annotProxy = new PopplerAnnotationProxy(pdfdoc.get(), userMutex(), &annotationsOnOpenHash, [this](int page) { markPageLocallyEdited(page); });
 
     setAdditionalDocumentAction(Okular::Document::CloseDocument, createLinkFromPopplerLink(pdfdoc->additionalAction(Poppler::Document::CloseDocument)));
     setAdditionalDocumentAction(Okular::Document::SaveDocumentStart, createLinkFromPopplerLink(pdfdoc->additionalAction(Poppler::Document::SaveDocumentStart)));
     setAdditionalDocumentAction(Okular::Document::SaveDocumentFinish, createLinkFromPopplerLink(pdfdoc->additionalAction(Poppler::Document::SaveDocumentFinish)));
     setAdditionalDocumentAction(Okular::Document::PrintDocumentStart, createLinkFromPopplerLink(pdfdoc->additionalAction(Poppler::Document::PrintDocumentStart)));
     setAdditionalDocumentAction(Okular::Document::PrintDocumentFinish, createLinkFromPopplerLink(pdfdoc->additionalAction(Poppler::Document::PrintDocumentFinish)));
+
+    // Snapshot everything a render thread needs in order to build its own copy of
+    // this document, so it never has to touch pdfdoc. Done last, with the document
+    // fully configured, and only for files that can actually be reopened from
+    // disk: an in-memory document has no path, and reopening an encrypted one
+    // would mean holding on to the password.
+    if (!documentFilePath.isEmpty() && !documentHasPassword) {
+        renderPoolPath = documentFilePath;
+        renderPoolPageCount = pageCount;
+        renderPoolHints = pdfdoc->renderHints();
+        renderPoolBackend = pdfdoc->renderBackend();
+        renderPoolPaperColor = pdfdoc->paperColor();
+        // reparseConfig() above will have disabled the pool while settling the
+        // initial settings; it is allowed from here on.
+        renderPoolDisabled.store(false, std::memory_order_relaxed);
+    }
 
     // the file has been loaded correctly
     return Okular::Document::OpenSuccess;
@@ -871,6 +888,18 @@ bool PDFGenerator::doCloseDocument()
     nextFontPage = 0;
     rectsGenerated.clear();
 
+    // Generator::closeDocument() waits for every in-flight render before calling
+    // us, so the clones are provably unused and can be released here.
+    renderPoolMutex.lock();
+    renderPoolDocs.clear();
+    renderPoolMutexes.clear();
+    pagesLocallyEdited.clear();
+    renderPoolMutex.unlock();
+    renderPoolPath.clear();
+    renderPoolPageCount = 0;
+    renderPoolDisabled.store(false, std::memory_order_relaxed);
+    documentHasFormFields = false;
+
     return true;
 }
 
@@ -928,6 +957,9 @@ void PDFGenerator::loadPages(QList<Okular::Page *> &pagesVector, int rotation, b
             }
             if (!okularFormFields.isEmpty()) {
                 page->setFormFields(okularFormFields);
+                // Form values live in pdfdoc's memory, so a clone reading the file
+                // from disk would render the page without them.
+                documentHasFormFields = true;
             }
             // qWarning(PDFDebug).nospace() << page->width() << "x" << page->height();
 
@@ -1284,6 +1316,90 @@ static bool shouldAbortRenderCallback(const QVariant &vPayload)
     return payload->request->shouldAbortRender();
 }
 
+int PDFGenerator::maxConcurrentRenders() const
+{
+    // renderPoolPath is only set once the document is fully loaded and is known
+    // to be clonable, so this reads as 1 during load and for anything the pool
+    // cannot mirror (in-memory documents, encrypted files, documents with forms).
+    if (renderPoolDisabled.load(std::memory_order_relaxed) || documentHasFormFields || renderPoolPath.isEmpty()) {
+        return 1;
+    }
+    return qBound(1, PDFSettings::renderThreads(), 16);
+}
+
+void PDFGenerator::disableRenderPool()
+{
+    // Note this never frees the clones: a render thread may be using one right
+    // now. They are released in doCloseDocument(), by which point the core has
+    // drained every in-flight render.
+    renderPoolDisabled.store(true, std::memory_order_relaxed);
+}
+
+void PDFGenerator::markPageLocallyEdited(int page)
+{
+    QMutexLocker poolLocker(&renderPoolMutex);
+    if (page < 0) {
+        return;
+    }
+    if (pagesLocallyEdited.size() <= page) {
+        pagesLocallyEdited.resize(page + 1);
+    }
+    pagesLocallyEdited.setBit(page);
+}
+
+Poppler::Document *PDFGenerator::documentForSlot(int slot, int pageNumber, QMutex **mutexOut)
+{
+    if (slot <= 0 || renderPoolDisabled.load(std::memory_order_relaxed) || renderPoolPath.isEmpty()) {
+        *mutexOut = userMutex();
+        return pdfdoc.get();
+    }
+
+    QMutexLocker poolLocker(&renderPoolMutex);
+
+    // A page edited in memory has to come from pdfdoc: the clones only know the
+    // file as it is on disk. Just this page, though, not the whole document.
+    if (pageNumber >= 0 && pageNumber < pagesLocallyEdited.size() && pagesLocallyEdited.testBit(pageNumber)) {
+        poolLocker.unlock();
+        *mutexOut = userMutex();
+        return pdfdoc.get();
+    }
+
+    if (int(renderPoolDocs.size()) <= slot) {
+        renderPoolDocs.resize(slot + 1);
+        renderPoolMutexes.resize(slot + 1);
+    }
+
+    if (!renderPoolDocs[slot]) {
+        std::unique_ptr<Poppler::Document> clone = Poppler::Document::load(renderPoolPath, nullptr, nullptr);
+        // A clone that does not match the document we are displaying is worse
+        // than no clone at all, so fall back to serial rendering instead.
+        if (!clone || clone->isLocked() || clone->numPages() != renderPoolPageCount) {
+            poolLocker.unlock();
+            disableRenderPool();
+            *mutexOut = userMutex();
+            return pdfdoc.get();
+        }
+        clone->setRenderBackend(renderPoolBackend);
+        clone->setPaperColor(renderPoolPaperColor);
+        for (const Poppler::Document::RenderHint hint : {Poppler::Document::Antialiasing,
+                                                         Poppler::Document::TextAntialiasing,
+                                                         Poppler::Document::TextHinting,
+                                                         Poppler::Document::TextSlightHinting,
+                                                         Poppler::Document::OverprintPreview,
+                                                         Poppler::Document::ThinLineSolid,
+                                                         Poppler::Document::ThinLineShape,
+                                                         Poppler::Document::IgnorePaperColor,
+                                                         Poppler::Document::HideAnnotations}) {
+            clone->setRenderHint(hint, renderPoolHints.testFlag(hint));
+        }
+        renderPoolMutexes[slot] = std::make_unique<QMutex>();
+        renderPoolDocs[slot] = std::move(clone);
+    }
+
+    *mutexOut = renderPoolMutexes[slot].get();
+    return renderPoolDocs[slot].get();
+}
+
 QImage PDFGenerator::image(Okular::PixmapRequest *request)
 {
     // debug requests to this (xpdf) generator
@@ -1301,20 +1417,32 @@ QImage PDFGenerator::image(Okular::PixmapRequest *request)
     qreal fakeDpiX = request->width() / pageWidth * dpi().width();
     qreal fakeDpiY = request->height() / pageHeight * dpi().height();
 
-    // generate links rects only the first time
-    bool genObjectRects = !rectsGenerated.at(page->number());
+    // Rendering may be running on several threads at once, each on its own
+    // Poppler::Document. Slot 0 is pdfdoc under userMutex(), as it always was.
+    const int renderSlot = currentRenderSlot();
+    QMutex *renderMutex = nullptr;
+    Poppler::Document *renderDoc = documentForSlot(renderSlot, page->number(), &renderMutex);
+
+    const bool traceRender = OkularRenderTrace().isDebugEnabled();
+    QElapsedTimer renderClock;
+    if (traceRender) {
+        renderClock.start();
+    }
 
     // 0. LOCK [waits for the thread end]
-    userMutex()->lock();
+    renderMutex->lock();
 
     if (request->shouldAbortRender()) {
-        userMutex()->unlock();
+        if (traceRender) {
+            qCDebug(OkularRenderTrace).nospace() << "RENDERTRACE slot=" << renderSlot << " page=" << page->number() << " w=" << request->width() << " h=" << request->height() << " ms=" << renderClock.elapsed() << " result=abort-before";
+        }
+        renderMutex->unlock();
         return QImage();
     }
 
     // 1. Set OutputDev parameters and Generate contents
     // note: thread safety is set on 'false' for the GUI (this) thread
-    std::unique_ptr<Poppler::Page> p = pdfdoc->page(page->number());
+    std::unique_ptr<Poppler::Page> p = renderDoc->page(page->number());
 
     // 2. Take data from outputdev and attach it to the Page
     QImage img;
@@ -1343,18 +1471,42 @@ QImage PDFGenerator::image(Okular::PixmapRequest *request)
         img.fill(Qt::white);
     }
 
-    if (p && genObjectRects) {
+    // Link rects are built once per page into state every render slot shares, so
+    // claim that work under its own lock: two slots rendering the same page must
+    // not both do it. Reading the poppler links still needs the render lock.
+    QList<Okular::ObjectRect *> linkRects;
+    bool generatedObjectRects = false;
+    if (p) {
+        QMutexLocker objectRectsLocker(&objectRectsMutex);
+        if (!rectsGenerated.at(page->number())) {
+            rectsGenerated.setBit(page->number());
+            generatedObjectRects = true;
+        }
+    }
+    if (generatedObjectRects) {
         // TODO previously we extracted Image type rects too, but that needed porting to poppler
         // and as we are not doing anything with Image type rects i did not port it, have a look at
         // dead gp_outputdev.cpp on image extraction
-        page->setObjectRects(generateLinks(p->links()));
-        rectsGenerated[request->page()->number()] = true;
-
-        resolveMediaLinkReferences(page);
+        linkRects = generateLinks(p->links());
     }
 
     // 3. UNLOCK [re-enables shared access]
-    userMutex()->unlock();
+    renderMutex->unlock();
+
+    if (generatedObjectRects) {
+        // Publishing the rects and resolving media links reaches state shared with
+        // the annotation proxy, which does its own work under userMutex(), so this
+        // part has to hold that lock rather than the per-slot render lock. It is
+        // taken only after the render lock is released, never while holding it.
+        QMutexLocker userLocker(userMutex());
+        page->setObjectRects(linkRects);
+        resolveMediaLinkReferences(page);
+    }
+
+    if (traceRender) {
+        qCDebug(OkularRenderTrace).nospace() << "RENDERTRACE slot=" << renderSlot << " page=" << page->number() << " w=" << request->width() << " h=" << request->height() << " ms=" << renderClock.elapsed()
+                                             << " result=" << (request->shouldAbortRender() ? "abort-during" : "done");
+    }
 
     return img;
 }
@@ -1734,6 +1886,12 @@ bool PDFGenerator::reparseConfig()
     }
     bool aaChanged = setDocumentRenderHints();
     somethingchanged = somethingchanged || aaChanged;
+    if (somethingchanged) {
+        // The clones were built with the old settings, and they cannot be
+        // reconfigured while renders may be running on them, so stop using them.
+        // Reopening the document brings parallel rendering back.
+        disableRenderPool();
+    }
     return somethingchanged;
 }
 
@@ -2262,5 +2420,6 @@ void PDFGenerator::xrefReconstructionHandler()
 #include "generator_pdf.moc"
 
 Q_LOGGING_CATEGORY(OkularPdfDebug, "org.kde.okular.generators.pdf", QtWarningMsg)
+Q_LOGGING_CATEGORY(OkularRenderTrace, "org.kde.okular.rendertrace", QtWarningMsg)
 
 /* kate: replace-tabs on; indent-width 4; */

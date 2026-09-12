@@ -17,6 +17,8 @@
 #include <poppler-version.h>
 
 #include <QBitArray>
+#include <QColor>
+#include <QMutex>
 #include <QPointer>
 
 #include <core/annotations.h>
@@ -27,7 +29,10 @@
 #include <interfaces/printinterface.h>
 #include <interfaces/saveinterface.h>
 
+#include <atomic>
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
 class PDFOptionsPage;
 class PopplerAnnotationProxy;
@@ -109,6 +114,24 @@ public:
 
     QByteArray requestFontData(const Okular::FontInfo &font) override;
 
+    int maxConcurrentRenders() const override;
+
+    /**
+     * Stop rendering from the clone documents for the rest of this document's
+     * life, for everything the pool cannot mirror at all (a settings change, a
+     * clone that does not match the file).
+     */
+    void disableRenderPool();
+
+    /**
+     * Mark one page as edited in memory. The clones read the file as it is on
+     * disk, so they cannot see an annotation that has not been saved; that page
+     * renders from pdfdoc from here on, while every other page keeps its
+     * parallelism. Annotating one page of a long document must not cost the
+     * throughput of the other eight hundred.
+     */
+    void markPageLocallyEdited(int page);
+
     static void okularToPoppler(const Okular::NewSignatureData &oData, Poppler::PDFConverter::NewSignatureData *pData);
 
     enum DocumentAdditionalActionType {
@@ -146,6 +169,42 @@ private:
 
     // poppler dependent stuff
     std::unique_ptr<Poppler::Document> pdfdoc;
+
+    // --- parallel rasterisation ---------------------------------------------
+    // A Poppler::Document cannot be used from two threads at once, so rendering
+    // several pages concurrently needs one independent Document per render slot.
+    // Slot 0 is pdfdoc itself, guarded by userMutex(); every other slot gets a
+    // private clone of the file plus its own mutex, created on first use. Every
+    // path that is not rendering (text, annotations, forms, fonts, signatures,
+    // printing) keeps using pdfdoc under userMutex() exactly as before.
+    //
+    // Returns the document for a slot and, through mutexOut, the mutex that must
+    // be held while using it. Safe to call from a render thread: it never reads
+    // pdfdoc, only the renderPool* values captured on the main thread at load.
+    Poppler::Document *documentForSlot(int slot, int pageNumber, QMutex **mutexOut);
+
+    QMutex renderPoolMutex; // guards the vectors below, and pagesLocallyEdited
+    // Pages carrying in-memory edits the clones cannot see. Grows only when the
+    // user annotates, and is cleared when the document is closed or swapped.
+    QBitArray pagesLocallyEdited;
+    std::vector<std::unique_ptr<Poppler::Document>> renderPoolDocs;
+    std::vector<std::unique_ptr<QMutex>> renderPoolMutexes;
+    // Everything a render thread needs in order to build a clone, snapshotted on
+    // the main thread once the document is fully configured.
+    QString renderPoolPath;
+    Poppler::Document::RenderHints renderPoolHints;
+    Poppler::Document::RenderBackend renderPoolBackend = Poppler::Document::SplashBackend;
+    QColor renderPoolPaperColor;
+    int renderPoolPageCount = 0;
+    std::atomic<bool> renderPoolDisabled {false};
+    // Clones cannot reflect filled-in form values, so documents that have any
+    // form fields render serially.
+    bool documentHasFormFields = false;
+
+    // Guards the once-per-page link bookkeeping that image() does after
+    // rendering. That state is shared by every slot, so it gets its own short
+    // lock rather than riding on the render lock.
+    QMutex objectRectsMutex;
 
     void xrefReconstructionHandler();
 

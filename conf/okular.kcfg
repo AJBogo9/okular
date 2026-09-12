@@ -315,6 +315,36 @@
   <entry key="SmoothScrolling" type="Bool" >
    <default>true</default>
   </entry>
+  <entry key="SmoothScrollResponse" type="Int" >
+   <label>Percent of the remaining scroll distance to cover each frame. Lower is smoother but laggier.</label>
+   <default>35</default>
+    <min>5</min>
+    <max>100</max>
+  </entry>
+  <entry key="ScrollLodFactor" type="Int" >
+   <label>Render pages at 1/N of their size while scrolling fast. 1 disables.</label>
+   <!-- Off by default: this engages correctly but its user-visible benefit has
+        never been demonstrated, so it should not be on in a fresh profile. -->
+   <default>1</default>
+    <min>1</min>
+    <max>16</max>
+  </entry>
+  <entry key="ScrollLodEngageVelocity" type="Int" >
+   <label>Scroll speed, in pixels per second, above which reduced resolution is used.</label>
+   <default>2000</default>
+    <min>1</min>
+  </entry>
+  <entry key="ScrollLodReleaseVelocity" type="Int" >
+   <label>Scroll speed, in pixels per second, below which full resolution returns.</label>
+   <default>1200</default>
+    <min>1</min>
+  </entry>
+  <entry key="ScrollLodSettleMs" type="Int" >
+   <label>Delay before re-rendering at full resolution once scrolling slows.</label>
+   <default>150</default>
+    <min>0</min>
+    <max>2000</max>
+  </entry>
   <entry key="ShowScrollBars" type="Bool" >
    <default>true</default>
   </entry>

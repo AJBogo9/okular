@@ -39,9 +39,8 @@ using namespace Okular;
 GeneratorPrivate::GeneratorPrivate()
     : q_ptr(nullptr)
     , m_document(nullptr)
-    , mPixmapGenerationThread(nullptr)
+    , mRunningRenders(0)
     , mTextPageGenerationThread(nullptr)
-    , mPixmapReady(true)
     , mTextPageReady(true)
     , m_closing(false)
     , m_closingLoop(nullptr)
@@ -52,11 +51,13 @@ GeneratorPrivate::GeneratorPrivate()
 
 GeneratorPrivate::~GeneratorPrivate()
 {
-    if (mPixmapGenerationThread) {
-        mPixmapGenerationThread->wait();
+    for (PixmapGenerationThread *thread : mPixmapGenerationThreads) {
+        if (thread) {
+            thread->wait();
+            delete thread;
+        }
     }
-
-    delete mPixmapGenerationThread;
+    mPixmapGenerationThreads.clear();
 
     if (mTextPageGenerationThread) {
         mTextPageGenerationThread->wait();
@@ -65,17 +66,74 @@ GeneratorPrivate::~GeneratorPrivate()
     delete mTextPageGenerationThread;
 }
 
-PixmapGenerationThread *GeneratorPrivate::pixmapGenerationThread()
+namespace
 {
-    if (mPixmapGenerationThread) {
-        return mPixmapGenerationThread;
+// Which render slot the current thread is working on. Read by
+// Generator::currentRenderSlot(); 0 on the main thread and on any generator that
+// never raised maxConcurrentRenders().
+thread_local int s_currentRenderSlot = 0;
+}
+
+int GeneratorPrivate::currentRenderSlot()
+{
+    return s_currentRenderSlot;
+}
+
+void GeneratorPrivate::setCurrentRenderSlot(int slot)
+{
+    s_currentRenderSlot = slot;
+}
+
+int GeneratorPrivate::renderSlots() const
+{
+    // Asked on every dispatch rather than cached, so a generator that has to
+    // drop back to serial rendering mid-document (a PDF gains an annotation, say)
+    // takes effect as soon as the renders already in flight have drained.
+    return qBound(1, q_ptr->maxConcurrentRenders(), 64);
+}
+
+int GeneratorPrivate::busyRenders() const
+{
+    return mRunningRenders + int(mReservedRequests.size());
+}
+
+bool GeneratorPrivate::allRendersIdle() const
+{
+    return mRunningRenders == 0 && mReservedRequests.isEmpty();
+}
+
+int GeneratorPrivate::freeRenderSlot()
+{
+    const int slots = renderSlots();
+    if (int(mSlotBusy.size()) < slots) {
+        mSlotBusy.resize(slots, false);
+    }
+    for (int i = 0; i < slots; ++i) {
+        if (!mSlotBusy[i]) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+PixmapGenerationThread *GeneratorPrivate::pixmapGenerationThread(int slot)
+{
+    if (slot < 0) {
+        slot = 0;
+    }
+    if (int(mPixmapGenerationThreads.size()) <= slot) {
+        mPixmapGenerationThreads.resize(slot + 1, nullptr);
+    }
+    if (mPixmapGenerationThreads[slot]) {
+        return mPixmapGenerationThreads[slot];
     }
 
     Q_Q(Generator);
-    mPixmapGenerationThread = new PixmapGenerationThread(q);
-    QObject::connect(mPixmapGenerationThread, &PixmapGenerationThread::finished, q, [this] { pixmapGenerationFinished(); }, Qt::QueuedConnection);
+    PixmapGenerationThread *thread = new PixmapGenerationThread(q, slot);
+    mPixmapGenerationThreads[slot] = thread;
+    QObject::connect(thread, &PixmapGenerationThread::finished, q, [this, slot] { pixmapGenerationFinished(slot); }, Qt::QueuedConnection);
 
-    return mPixmapGenerationThread;
+    return thread;
 }
 
 TextPageGenerationThread *GeneratorPrivate::textPageGenerationThread()
@@ -91,19 +149,26 @@ TextPageGenerationThread *GeneratorPrivate::textPageGenerationThread()
     return mTextPageGenerationThread;
 }
 
-void GeneratorPrivate::pixmapGenerationFinished()
+void GeneratorPrivate::pixmapGenerationFinished(int slot)
 {
     Q_Q(Generator);
-    PixmapRequest *request = mPixmapGenerationThread->request();
-    const QImage &img = mPixmapGenerationThread->image();
-    mPixmapGenerationThread->endGeneration();
+    PixmapGenerationThread *thread = mPixmapGenerationThreads.at(slot);
+    PixmapRequest *request = thread->request();
+    const QImage &img = thread->image();
+    const bool wantsBoundingBox = thread->calcBoundingBox();
+    const NormalizedRect boundingBox = thread->boundingBox();
+    thread->endGeneration();
 
     QMutexLocker locker(threadsLock());
 
+    // Only now, with the request and image harvested, may this slot be handed to
+    // another request.
+    mSlotBusy[slot] = false;
+    --mRunningRenders;
+
     if (m_closing) {
-        mPixmapReady = true;
         delete request;
-        if (mTextPageReady) {
+        if (allRendersIdle() && mTextPageReady) {
             locker.unlock();
             m_closingLoop->quit();
         }
@@ -114,8 +179,8 @@ void GeneratorPrivate::pixmapGenerationFinished()
         request->page()->setPixmap(request->observer(), new QPixmap(QPixmap::fromImage(img)), request->normalizedRect());
         const int pageNumber = request->page()->number();
 
-        if (mPixmapGenerationThread->calcBoundingBox()) {
-            q->updatePageBoundingBox(pageNumber, mPixmapGenerationThread->boundingBox());
+        if (wantsBoundingBox) {
+            q->updatePageBoundingBox(pageNumber, boundingBox);
         }
     } else {
         // Cancel the text page generation too if it's still running
@@ -125,7 +190,6 @@ void GeneratorPrivate::pixmapGenerationFinished()
         }
     }
 
-    mPixmapReady = true;
     q->signalPixmapRequestDone(request);
 }
 
@@ -140,7 +204,7 @@ void GeneratorPrivate::textpageGenerationFinished()
 
     if (m_closing) {
         delete mTextPageGenerationThread->textPage();
-        if (mPixmapReady) {
+        if (allRendersIdle()) {
             locker.unlock();
             m_closingLoop->quit();
         }
@@ -223,7 +287,7 @@ bool Generator::closeDocument()
     d->m_closing = true;
 
     d->threadsLock()->lock();
-    if (!(d->mPixmapReady && d->mTextPageReady)) {
+    if (!(d->allRendersIdle() && d->mTextPageReady)) {
         QEventLoop loop;
         d->m_closingLoop = &loop;
 
@@ -246,7 +310,17 @@ bool Generator::closeDocument()
 bool Generator::canGeneratePixmap() const
 {
     Q_D(const Generator);
-    return d->mPixmapReady;
+    return d->busyRenders() < d->renderSlots();
+}
+
+int Generator::maxConcurrentRenders() const
+{
+    return 1;
+}
+
+int Generator::currentRenderSlot() const
+{
+    return GeneratorPrivate::currentRenderSlot();
 }
 
 bool Generator::canSign() const
@@ -279,11 +353,16 @@ void Generator::setActiveCertificateBackend(Okular::CertificateInfo::Backend new
 void Generator::generatePixmap(PixmapRequest *request)
 {
     Q_D(Generator);
-    d->mPixmapReady = false;
 
     const bool calcBoundingBox = !request->isTile() && !request->page()->isBoundingBoxKnown();
 
     if (request->asynchronous() && hasFeature(Threaded)) {
+        // Claim a slot for this request up front and hold it across any retry
+        // below, so the core does not keep dispatching into a generator that is
+        // really already full. The claim is converted into a running render, or
+        // dropped, before this function returns.
+        d->mReservedRequests.insert(request);
+
         if (d->textPageGenerationThread()->isFinished() && !canGenerateTextPage()) {
             // It can happen that the text generation has already finished but
             // mTextPageReady is still false because textpageGenerationFinished
@@ -291,6 +370,14 @@ void Generator::generatePixmap(PixmapRequest *request)
             QTimer::singleShot(0, this, [this, request] { generatePixmap(request); });
             return;
         }
+
+        const int slot = d->freeRenderSlot();
+        if (slot < 0) {
+            // Every render thread is still busy; come back when one is harvested.
+            QTimer::singleShot(0, this, [this, request] { generatePixmap(request); });
+            return;
+        }
+        PixmapGenerationThread *thread = d->pixmapGenerationThread(slot);
 
         /**
          * We create the text page for every page that is visible to the
@@ -303,22 +390,29 @@ void Generator::generatePixmap(PixmapRequest *request)
             // dummy is used as a way to make sure the lambda gets disconnected each time it is executed
             // since not all the times the pixmap generation thread starts we want the text generation thread to also start
             QObject *dummy = new QObject();
-            connect(d_ptr->pixmapGenerationThread(), &QThread::started, dummy, [this, dummy] {
+            connect(thread, &QThread::started, dummy, [this, dummy] {
                 delete dummy;
                 d_ptr->textPageGenerationThread()->startGeneration();
             });
         }
+
+        // Turn the reservation into a running render before starting the thread:
+        // the slot must already read as busy when the completion lands.
+        d->mReservedRequests.remove(request);
+        d->mSlotBusy[slot] = true;
+        ++d->mRunningRenders;
+
         // pixmap generation thread must be started *after* connect(), else we may miss the start signal and get lock-ups (see bug 396137)
-        d->pixmapGenerationThread()->startGeneration(request, calcBoundingBox);
+        thread->startGeneration(request, calcBoundingBox);
 
         return;
     }
 
+    // Synchronous rendering happens on the calling thread, which owns slot 0.
+    GeneratorPrivate::setCurrentRenderSlot(0);
     const QImage &img = image(request);
     request->page()->setPixmap(request->observer(), new QPixmap(QPixmap::fromImage(img)), request->normalizedRect());
     const int pageNumber = request->page()->number();
-
-    d->mPixmapReady = true;
 
     signalPixmapRequestDone(request);
     if (calcBoundingBox) {

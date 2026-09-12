@@ -11,5 +11,6 @@
 #include <QLoggingCategory>
 
 Q_DECLARE_LOGGING_CATEGORY(OkularUiDebug)
+Q_DECLARE_LOGGING_CATEGORY(OkularScrollTrace)
 
 #endif

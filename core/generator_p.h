@@ -18,6 +18,7 @@
 #include <QThread>
 
 #include <atomic>
+#include <vector>
 
 class QEventLoop;
 
@@ -47,13 +48,30 @@ public:
     Q_DECLARE_PUBLIC(Generator)
     Generator *q_ptr;
 
-    PixmapGenerationThread *pixmapGenerationThread();
+    PixmapGenerationThread *pixmapGenerationThread(int slot);
     TextPageGenerationThread *textPageGenerationThread();
 
-    void pixmapGenerationFinished();
+    void pixmapGenerationFinished(int slot);
     void textpageGenerationFinished();
 
     QMutex *threadsLock();
+
+    /** How many renders may be in flight at once, clamped to something sane. */
+    int renderSlots() const;
+    /** Renders started or reserved but not yet harvested. */
+    int busyRenders() const;
+    /** Index of a slot with no thread running on it, or -1 if all are taken. */
+    int freeRenderSlot();
+    /** True once every in-flight render has been harvested. */
+    bool allRendersIdle() const;
+
+    /**
+     * The render slot the calling thread is working on. Set by
+     * PixmapGenerationThread::run() around the call into image(), so a generator
+     * can find its per-slot resources without changing the image() signature.
+     */
+    static int currentRenderSlot();
+    static void setCurrentRenderSlot(int slot);
 
     virtual QVariant metaData(const QString &key, const QVariant &option) const;
     virtual QImage image(PixmapRequest *);
@@ -62,11 +80,19 @@ public:
     // NOTE: the following should be a QSet< GeneratorFeature >,
     // but it is not to avoid #include'ing generator.h
     QSet<int> m_features;
-    PixmapGenerationThread *mPixmapGenerationThread;
+    // One render thread per slot, created lazily. mSlotBusy[i] stays true from
+    // the moment thread i is started until pixmapGenerationFinished(i) has
+    // harvested its result, because the thread's request and image must not be
+    // overwritten in between.
+    std::vector<PixmapGenerationThread *> mPixmapGenerationThreads;
+    std::vector<bool> mSlotBusy;
+    int mRunningRenders;
+    // Requests holding a slot but not yet started, because generatePixmap had to
+    // back off and retry while the text page thread settled.
+    QSet<PixmapRequest *> mReservedRequests;
     TextPageGenerationThread *mTextPageGenerationThread;
     mutable QMutex m_mutex;
     QMutex m_threadsMutex;
-    bool mPixmapReady : 1;
     bool mTextPageReady : 1;
     bool m_closing : 1;
     QEventLoop *m_closingLoop;
@@ -111,7 +137,9 @@ class PixmapGenerationThread : public QThread
     Q_OBJECT
 
 public:
-    explicit PixmapGenerationThread(Generator *generator);
+    explicit PixmapGenerationThread(Generator *generator, int slot);
+
+    int slot() const;
 
     void startGeneration(PixmapRequest *request, bool calcBoundingBox);
 
@@ -130,6 +158,7 @@ private:
     Generator *mGenerator;
     PixmapRequest *mRequest;
     NormalizedRect mBoundingBox;
+    int mSlot;
     bool mCalcBoundingBox : 1;
 };
 

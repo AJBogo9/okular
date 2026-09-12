@@ -13,11 +13,17 @@
 
 using namespace Okular;
 
-PixmapGenerationThread::PixmapGenerationThread(Generator *generator)
+PixmapGenerationThread::PixmapGenerationThread(Generator *generator, int slot)
     : mGenerator(generator)
     , mRequest(nullptr)
+    , mSlot(slot)
     , mCalcBoundingBox(false)
 {
+}
+
+int PixmapGenerationThread::slot() const
+{
+    return mSlot;
 }
 
 void PixmapGenerationThread::startGeneration(PixmapRequest *request, bool calcBoundingBox)
@@ -56,6 +62,10 @@ NormalizedRect PixmapGenerationThread::boundingBox() const
 void PixmapGenerationThread::run()
 {
     if (mRequest) {
+        // Publish which slot this thread owns, so image() can pick the matching
+        // per-slot resources without the slot having to travel through the
+        // Generator::image() signature that every backend implements.
+        GeneratorPrivate::setCurrentRenderSlot(mSlot);
         PixmapRequestPrivate::get(mRequest)->mResultImage = mGenerator->image(mRequest);
 
         if (mCalcBoundingBox) {

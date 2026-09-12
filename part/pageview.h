@@ -205,6 +205,8 @@ protected:
     void scrollContentsBy(int dx, int dy) override;
 
 private:
+    // scroll by delta over the next few frames instead of in one jump
+    void scrollSmoothlyBy(const QPoint delta);
     // draw background and items on the opened qpainter
     void drawDocumentOnPainter(const QRect contentsRect, QPainter *p);
     // update item width and height using current zoom parameters
@@ -325,6 +327,7 @@ private Q_SLOTS:
     void slotAutoScrollDown();
     void slotScrollUp(int nSteps = 0);
     void slotScrollDown(int nSteps = 0);
+    void slotSmoothScrollStep();
     void slotRotateClockwise();
     void slotRotateCounterClockwise();
     void slotRotateOriginal();

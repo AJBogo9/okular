@@ -70,9 +70,10 @@ static int maskExportedFlags(int flags)
 }
 
 // BEGIN PopplerAnnotationProxy implementation
-PopplerAnnotationProxy::PopplerAnnotationProxy(Poppler::Document *doc, QMutex *userMutex, QHash<Okular::Annotation *, Poppler::Annotation *> *annotsOnOpenHash)
+PopplerAnnotationProxy::PopplerAnnotationProxy(Poppler::Document *doc, QMutex *userMutex, QHash<Okular::Annotation *, Poppler::Annotation *> *annotsOnOpenHash, std::function<void(int)> onPageModified)
     : ppl_doc(doc)
     , mutex(userMutex)
+    , pageModifiedCallback(std::move(onPageModified))
     , annotationsOnOpenHash(annotsOnOpenHash)
 {
 }
@@ -634,6 +635,9 @@ static Poppler::Annotation *createPopplerAnnotationFromOkularAnnotation(const Ok
 }
 void PopplerAnnotationProxy::notifyAddition(Okular::Annotation *okl_ann, int page)
 {
+    if (pageModifiedCallback) {
+        pageModifiedCallback(page);
+    }
     QMutexLocker ml(mutex);
 
     std::unique_ptr<Poppler::Page> ppl_page = ppl_doc->page(page);
@@ -708,6 +712,9 @@ void PopplerAnnotationProxy::notifyAddition(Okular::Annotation *okl_ann, int pag
 
 void PopplerAnnotationProxy::notifyModification(const Okular::Annotation *okl_ann, int page, bool appearanceChanged)
 {
+    if (pageModifiedCallback) {
+        pageModifiedCallback(page);
+    }
     Q_UNUSED(page);
     Q_UNUSED(appearanceChanged);
 
@@ -807,6 +814,9 @@ void PopplerAnnotationProxy::notifyModification(const Okular::Annotation *okl_an
 
 void PopplerAnnotationProxy::notifyRemoval(Okular::Annotation *okl_ann, int page)
 {
+    if (pageModifiedCallback) {
+        pageModifiedCallback(page);
+    }
     Poppler::Annotation *ppl_ann = qvariant_cast<Poppler::Annotation *>(okl_ann->nativeId());
 
     if (!ppl_ann) { // Ignore non-native annotations

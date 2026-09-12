@@ -62,6 +62,7 @@
 
 // system includes
 #include <array>
+#include <cmath>
 #include <math.h>
 #include <stdlib.h>
 
@@ -97,6 +98,7 @@
 #include "core/tile.h"
 #include "kleopatraintegration.h"
 #include "magnifierview.h"
+#include "scrolllod.h"
 #include "settings.h"
 #include "settings_core.h"
 #include "signaturepartutils.h"
@@ -283,6 +285,23 @@ public:
 
     QScroller *scroller = nullptr;
 
+    // Monotonic clock shared by the scroll trace and the level-of-detail sampler.
+    QElapsedTimer viewClock;
+
+    // Wheel scrolling is smoothed here rather than by QScroller. A timed
+    // QScroller::scrollTo restarts its easing from zero velocity on every call, so
+    // at wheel event rates (one every ~12 ms on a free-spinning wheel) the view
+    // never leaves the slow start of the curve and moves in lurches: measured at
+    // 4, 6, 21, 45, 275, 57, 2, 76 px on consecutive 16 ms frames. Instead,
+    // accumulate the distance owed and pay out a fixed fraction of it each frame.
+    QTimer *smoothScrollTimer = nullptr;
+    QPointF smoothScrollOwed;
+
+    // Scroll level of detail: render cheaper pixmaps while the view moves faster
+    // than the rasteriser can follow, then re-sharpen once it settles.
+    ScrollLod::Tracker lodTracker;
+    QTimer *lodSettleTimer = nullptr;
+
     bool pinchZoomActive = false;
     // The remaining scroll from the previous zoom event
     QPointF remainingScroll;
@@ -295,6 +314,9 @@ public:
 PageViewPrivate::PageViewPrivate(PageView *qq)
     : q(qq)
 {
+    // Started here rather than in PageView's constructor so that any trace or
+    // velocity sample taken during construction has a valid clock.
+    viewClock.start();
 }
 
 FormWidgetsController *PageViewPrivate::formWidgetsController()
@@ -388,6 +410,21 @@ PageView::PageView(QWidget *parent, Okular::Document *document)
     d->delayResizeEventTimer->setObjectName(QStringLiteral("delayResizeEventTimer"));
     connect(d->delayResizeEventTimer, &QTimer::timeout, this, &PageView::delayedResizeEvent);
 
+    // Scroll level of detail. The re-sharpening pass is deferred rather than issued
+    // on the first slow event: a full size request cancels the reduced render still
+    // in flight for that page and takes its pixmap with it, which would show white
+    // instead of blurry exactly where the reader stopped.
+    d->smoothScrollTimer = new QTimer(this);
+    d->smoothScrollTimer->setObjectName(QStringLiteral("smoothScrollTimer"));
+    d->smoothScrollTimer->setTimerType(Qt::PreciseTimer);
+    d->smoothScrollTimer->setInterval(16); // one frame at 60 Hz
+    connect(d->smoothScrollTimer, &QTimer::timeout, this, &PageView::slotSmoothScrollStep);
+
+    d->lodSettleTimer = new QTimer(this);
+    d->lodSettleTimer->setSingleShot(true);
+    d->lodSettleTimer->setObjectName(QStringLiteral("lodSettleTimer"));
+    connect(d->lodSettleTimer, &QTimer::timeout, this, [this] { slotRequestVisiblePixmaps(); });
+
     setFrameStyle(QFrame::NoFrame);
 
     setAttribute(Qt::WA_StaticContents);
@@ -413,7 +450,10 @@ PageView::PageView(QWidget *parent, Okular::Document *document)
     prop.setScrollMetric(QScrollerProperties::DragStartDistance, 0.0);
     d->scroller->setScrollerProperties(prop);
 
-    connect(d->scroller, &QScroller::stateChanged, this, [this](QScroller::State s) { slotRequestVisiblePixmaps(s); });
+    connect(d->scroller, &QScroller::stateChanged, this, [this](QScroller::State s) {
+        qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE state t=" << d->viewClock.nsecsElapsed() / 1000 << " state=" << int(s) << " value=" << verticalScrollBar()->value();
+        slotRequestVisiblePixmaps(s);
+    });
 
     // the apparently "magic" value of 20 is the same used internally in QScrollArea
     verticalScrollBar()->setCursor(Qt::ArrowCursor);
@@ -3381,6 +3421,16 @@ void PageView::wheelEvent(QWheelEvent *e)
     int delta = e->angleDelta().y(), vScroll = verticalScrollBar()->value();
     e->accept();
 
+    if (OkularScrollTrace().isDebugEnabled()) {
+        // A wheel delta that is a whole multiple of 120 takes the animated path via
+        // slotScrollUp/Down; anything else (a hi-res or free-spin wheel) is applied
+        // as an instant, unanimated jump. Record which, to tell them apart later.
+        const bool wholeStep = delta != 0 && delta % QWheelEvent::DefaultDeltasPerStep == 0;
+        qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE wheel t=" << d->viewClock.nsecsElapsed() / 1000 << " angle=" << delta << " pixel=" << e->pixelDelta().y() << " phase=" << int(e->phase()) << " inverted=" << e->inverted()
+                                             << " source=" << int(e->deviceType()) << " path=" << (wholeStep ? "animated" : "instant") << " value=" << vScroll << " final=" << d->scroller->finalPosition().y()
+                                             << " state=" << int(d->scroller->state());
+    }
+
     if ((e->modifiers() & Qt::ControlModifier) == Qt::ControlModifier) {
         // Ctrl key is pressed, perform zoom instead of scroll
 
@@ -3507,6 +3557,8 @@ bool PageView::viewportEvent(QEvent *e)
 
 void PageView::scrollContentsBy(int dx, int dy)
 {
+    qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE move t=" << d->viewClock.nsecsElapsed() / 1000 << " dx=" << dx << " dy=" << dy << " value=" << verticalScrollBar()->value();
+
     const QRect r = viewport()->rect();
     viewport()->scroll(dx, dy, r);
     // HACK manually repaint the damaged regions, as it seems some updates are missed
@@ -4733,6 +4785,10 @@ void PageView::zoomWithFixedCenter(PageView::ZoomMode newZoomMode, QPointF zoomC
 void PageView::slotRelayoutPages()
 // called by: notifySetup, viewportResizeEvent, slotViewMode, slotContinuousToggled, updateZoom
 {
+    // Zoom, view mode and document changes all move the scroll position without the
+    // view moving, so the previous sample is no longer a reference for velocity.
+    d->lodTracker.reset();
+
     // set an empty container if we have no pages
     const int pageCount = d->items.count();
     if (pageCount < 1) {
@@ -4967,6 +5023,28 @@ void PageView::slotRequestVisiblePixmaps(int newValue)
     // Margin (in pixels) around the viewport to preload
     const int pixelsToExpand = 512;
 
+    // Scroll level of detail: measure how fast the view is moving and, above the
+    // speed the rasteriser can sustain, ask for reduced size pixmaps. Velocity is
+    // measured here rather than taken from newValue, which carries a QScroller
+    // state on one call path and a horizontal position on another.
+    const int lodFactor = Okular::Settings::scrollLodFactor();
+    bool useLod = false;
+    if (lodFactor > 1) {
+        ScrollLod::Policy policy;
+        policy.engageAbovePxPerSec = Okular::Settings::scrollLodEngageVelocity();
+        policy.releaseBelowPxPerSec = Okular::Settings::scrollLodReleaseVelocity();
+        d->lodTracker.setPolicy(policy);
+
+        const bool wasEngaged = d->lodTracker.engaged();
+        const bool engaged = d->lodTracker.sample(viewportRect.left(), viewportRect.top(), d->viewClock.elapsed(), viewport()->height());
+        if (engaged) {
+            d->lodSettleTimer->stop();
+        } else if (wasEngaged) {
+            d->lodSettleTimer->start(Okular::Settings::scrollLodSettleMs());
+        }
+        useLod = engaged || d->lodSettleTimer->isActive();
+    }
+
     // iterate over all items
     d->visibleItems.clear();
     QList<Okular::PixmapRequest *> requestedPixmaps;
@@ -5024,11 +5102,32 @@ void PageView::slotRequestVisiblePixmaps(int newValue)
         }
 
         // if the item has not the right pixmap, add a request for it
-        if (!i->page()->hasPixmap(this, i->uncroppedWidth(), i->uncroppedHeight(), expandedVisibleRect)) {
+        bool needsRequest = !i->page()->hasPixmap(this, i->uncroppedWidth(), i->uncroppedHeight(), expandedVisibleRect);
+        int requestWidth = i->uncroppedWidth();
+        int requestHeight = i->uncroppedHeight();
+
+        // While moving fast, ask for a cheaper pixmap. Two things this must not do:
+        // downgrade a page already held at full size, since setPixmap() replaces and
+        // the sharp render would be thrown away and paid for twice; and touch a tiled
+        // page, where any size change marks every tile dirty and a reduced size drops
+        // below the threshold that keeps the tile manager alive.
+        if (needsRequest && useLod && requestWidth > 0 && requestHeight > 0 && !i->page()->hasTilesManager(this)) {
+            const int lodWidth = ScrollLod::reducedSize(requestWidth, lodFactor);
+            const int lodHeight = ScrollLod::reducedSize(requestHeight, lodFactor);
+            if (i->page()->hasPixmap(this, lodWidth, lodHeight, expandedVisibleRect)) {
+                // The reduced pixmap is already there and is good enough while moving.
+                needsRequest = false;
+            } else {
+                requestWidth = lodWidth;
+                requestHeight = lodHeight;
+            }
+        }
+
+        if (needsRequest) {
 #ifdef PAGEVIEW_DEBUG
             qWarning() << "rerequesting visible pixmaps for page" << i->pageNumber() << "!";
 #endif
-            Okular::PixmapRequest *p = new Okular::PixmapRequest(this, i->pageNumber(), i->uncroppedWidth(), i->uncroppedHeight(), devicePixelRatioF(), PAGEVIEW_PRIO, Okular::PixmapRequest::Asynchronous);
+            Okular::PixmapRequest *p = new Okular::PixmapRequest(this, i->pageNumber(), requestWidth, requestHeight, devicePixelRatioF(), PAGEVIEW_PRIO, Okular::PixmapRequest::Asynchronous);
             requestedPixmaps.push_back(p);
 
             if (i->page()->hasTilesManager(this)) {
@@ -5462,7 +5561,7 @@ void PageView::slotScrollUp(int nSteps)
 {
     if (verticalScrollBar()->value() > verticalScrollBar()->minimum()) {
         if (nSteps) {
-            d->scroller->scrollTo(d->scroller->finalPosition() + QPoint(0, -100 * nSteps), d->currentShortScrollDuration);
+            scrollSmoothlyBy(QPoint(0, -100 * nSteps));
         } else {
             if (d->scroller->finalPosition().y() > verticalScrollBar()->minimum()) {
                 d->scroller->scrollTo(d->scroller->finalPosition() + QPoint(0, -(1 - Okular::Settings::scrollOverlap() / 100.0) * viewport()->height()), d->currentLongScrollDuration);
@@ -5482,11 +5581,75 @@ void PageView::slotScrollUp(int nSteps)
     }
 }
 
+// Pays out a fraction of what is still owed along one axis, keeping the sub-pixel
+// remainder so slow scrolls do not lose distance to rounding. Always moves at least
+// one pixel while anything is owed, so the view never stalls mid-scroll.
+static int payOutScroll(qreal &owed, qreal fraction)
+{
+    if (qAbs(owed) < 1.0) {
+        return 0;
+    }
+    const qreal want = owed * fraction;
+    int step = want > 0 ? int(std::ceil(want)) : int(std::floor(want));
+    if (qAbs(step) > qAbs(owed)) {
+        step = owed > 0 ? int(std::floor(owed)) : int(std::ceil(owed));
+    }
+    owed -= step;
+    return step;
+}
+
+void PageView::scrollSmoothlyBy(const QPoint delta)
+{
+    if (delta.isNull()) {
+        return;
+    }
+
+    // Smooth scrolling turned off, or animations disabled globally: move at once.
+    if (d->currentShortScrollDuration == 0) {
+        d->scroller->scrollTo(d->scroller->finalPosition() + delta, 0);
+        return;
+    }
+
+    d->smoothScrollOwed += delta;
+    if (!d->smoothScrollTimer->isActive()) {
+        d->smoothScrollTimer->start();
+        // Move on the frame the input arrived on rather than waiting for the tick.
+        slotSmoothScrollStep();
+    }
+}
+
+void PageView::slotSmoothScrollStep()
+{
+    // A drag or a kinetic fling owns the scroller; drop what we owe and let it run.
+    const QScroller::State state = d->scroller->state();
+    if (state == QScroller::Pressed || state == QScroller::Dragging) {
+        d->smoothScrollOwed = QPointF();
+        d->smoothScrollTimer->stop();
+        return;
+    }
+
+    qreal owedX = d->smoothScrollOwed.x();
+    qreal owedY = d->smoothScrollOwed.y();
+    const qreal response = qBound(0.05, Okular::Settings::smoothScrollResponse() / 100.0, 1.0);
+    const int stepX = payOutScroll(owedX, response);
+    const int stepY = payOutScroll(owedY, response);
+    d->smoothScrollOwed = QPointF(owedX, owedY);
+
+    if (stepX || stepY) {
+        d->scroller->scrollTo(d->scroller->finalPosition() + QPoint(stepX, stepY), 0);
+    }
+
+    if (qAbs(owedX) < 1.0 && qAbs(owedY) < 1.0) {
+        d->smoothScrollOwed = QPointF();
+        d->smoothScrollTimer->stop();
+    }
+}
+
 void PageView::slotScrollDown(int nSteps)
 {
     if (verticalScrollBar()->value() < verticalScrollBar()->maximum()) {
         if (nSteps) {
-            d->scroller->scrollTo(d->scroller->finalPosition() + QPoint(0, 100 * nSteps), d->currentShortScrollDuration);
+            scrollSmoothlyBy(QPoint(0, 100 * nSteps));
         } else {
             if (d->scroller->finalPosition().y() < verticalScrollBar()->maximum()) {
                 d->scroller->scrollTo(d->scroller->finalPosition() + QPoint(0, (1 - Okular::Settings::scrollOverlap() / 100.0) * viewport()->height()), d->currentLongScrollDuration);

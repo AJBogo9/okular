@@ -20,12 +20,19 @@
 
 #include "core/annotations.h"
 
+#include <functional>
+
 extern Okular::Annotation *createAnnotationFromPopplerAnnotation(Poppler::Annotation *popplerAnnotation, const Poppler::Page &popplerPage, bool *doDelete);
 
 class PopplerAnnotationProxy : public Okular::AnnotationProxy
 {
 public:
-    PopplerAnnotationProxy(Poppler::Document *doc, QMutex *userMutex, QHash<Okular::Annotation *, Poppler::Annotation *> *annotsOnOpenHash);
+    /**
+     * @param onPageModified called with the page this proxy just changed, so the
+     * generator can stop rendering that page from copies of the file, which read
+     * the document as it is on disk and cannot see an in-memory edit.
+     */
+    PopplerAnnotationProxy(Poppler::Document *doc, QMutex *userMutex, QHash<Okular::Annotation *, Poppler::Annotation *> *annotsOnOpenHash, std::function<void(int)> onPageModified = {});
     ~PopplerAnnotationProxy() override;
 
     bool supports(Capability capability) const override;
@@ -36,6 +43,7 @@ public:
 private:
     Poppler::Document *ppl_doc;
     QMutex *mutex;
+    std::function<void(int)> pageModifiedCallback;
     QHash<Okular::Annotation *, Poppler::Annotation *> *annotationsOnOpenHash;
     std::unordered_map<Okular::StampAnnotation *, std::unique_ptr<Poppler::AnnotationAppearance>> deletedStampsAnnotationAppearance;
 };

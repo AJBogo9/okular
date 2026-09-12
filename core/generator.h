@@ -301,6 +301,20 @@ public:
      */
     virtual bool canGeneratePixmap() const;
 
+    /**
+     * Returns how many pixmap requests this generator is able to render at the
+     * same time.
+     *
+     * The default is 1, which keeps the historical one-request-at-a-time
+     * contract every generator was written against. A generator that can
+     * rasterise concurrently (because it keeps one independent parsing context
+     * per slot) returns a larger number, and the core will then keep that many
+     * requests in flight.
+     *
+     * @since 26.12
+     */
+    virtual int maxConcurrentRenders() const;
+
     virtual bool canSign() const;
 
     /**
@@ -605,6 +619,18 @@ protected:
      * Return the pointer to a mutex the generator can use freely.
      */
     QMutex *userMutex() const;
+
+    /**
+     * Returns the render slot the calling thread is rendering on, always in
+     * [0, maxConcurrentRenders()).
+     *
+     * Only meaningful while inside image(); it is 0 on every other thread and
+     * for every generator that did not raise maxConcurrentRenders(). A
+     * generator that keeps per-slot resources indexes them with this.
+     *
+     * @since 26.12
+     */
+    int currentRenderSlot() const;
 
     /**
      * Set the bounding box of a page after the page has already been handed
