@@ -285,6 +285,14 @@ public:
 
     QScroller *scroller = nullptr;
 
+    // Where a jump that is still being animated is headed. While the view moves,
+    // slotRequestVisiblePixmaps rewrites the document viewport to whatever the
+    // view is passing over, so a relayout in mid-flight cannot take that as the
+    // place to keep in view: it would re-centre on the transient position and
+    // leave the jump part of the way to its target. Invalid when nothing is in
+    // flight.
+    Okular::DocumentViewport pendingJumpViewport;
+
     // Monotonic clock shared by the scroll trace and the level-of-detail sampler.
     QElapsedTimer viewClock;
 
@@ -452,6 +460,10 @@ PageView::PageView(QWidget *parent, Okular::Document *document)
 
     connect(d->scroller, &QScroller::stateChanged, this, [this](QScroller::State s) {
         qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE state t=" << d->viewClock.nsecsElapsed() / 1000 << " state=" << int(s) << " value=" << verticalScrollBar()->value();
+        // The animation is over, or the user has taken the view over by hand.
+        if (s != QScroller::Scrolling) {
+            d->pendingJumpViewport = Okular::DocumentViewport();
+        }
         slotRequestVisiblePixmaps(s);
     });
 
@@ -1486,6 +1498,7 @@ void PageView::slotRealNotifyViewportChanged(bool smoothMove)
 {
     // if we are the one changing viewport, skip this notify
     if (d->blockViewport) {
+        qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE vpchange t=" << d->viewClock.nsecsElapsed() / 1000 << " DROPPED (blockViewport) page=" << d->document->viewport().pageNumber;
         return;
     }
 
@@ -1518,8 +1531,18 @@ void PageView::slotRealNotifyViewportChanged(bool smoothMove)
     // restore viewport center or use default {x-center,v-top} alignment
     const QPoint centerCoord = viewportToContentArea(vp);
 
+    const QRect itemGeom = item->croppedGeometry();
+    qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE vpchange t=" << d->viewClock.nsecsElapsed() / 1000 << " page=" << vp.pageNumber << " rePos=" << vp.rePos.enabled << " normY=" << vp.rePos.normalizedY << " posMode=" << int(vp.rePos.pos)
+                                        << " smooth=" << smoothMove << " itemGeom=" << itemGeom.x() << "," << itemGeom.y() << "," << itemGeom.width() << "x" << itemGeom.height() << " center=" << centerCoord.x() << "," << centerCoord.y()
+                                        << " vmax=" << verticalScrollBar()->maximum() << " vvalue=" << verticalScrollBar()->value();
+
     // if smooth movement requested, setup parameters and start it
     center(centerCoord.x(), centerCoord.y(), smoothMove);
+
+    // An animated jump takes a couple of hundred milliseconds, which is long
+    // enough for a relayout to land in the middle of it. Keep the destination so
+    // that the relayout can aim at it rather than at where the view has got to.
+    d->pendingJumpViewport = (smoothMove && d->scroller->state() == QScroller::Scrolling) ? vp : Okular::DocumentViewport();
 
     d->blockPixmapsRequest = false;
 
@@ -2106,6 +2129,9 @@ void PageView::drawTableDividers(QPainter *screenPainter)
 
 void PageView::resizeEvent(QResizeEvent *e)
 {
+    qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE resize t=" << d->viewClock.nsecsElapsed() / 1000 << " " << e->oldSize().width() << "x" << e->oldSize().height() << " -> " << e->size().width() << "x" << e->size().height()
+                                         << " vbar=" << verticalScrollBar()->isVisible() << " hbar=" << horizontalScrollBar()->isVisible() << " scroller=" << int(d->scroller->state());
+
     if (d->items.isEmpty()) {
         resizeContentArea(e->size());
         return;
@@ -2732,6 +2758,11 @@ void PageView::mouseReleaseEvent(QMouseEvent *e)
         PageViewItem *pageItem = pickItemOnPoint(eventPos.x(), eventPos.y());
         const QPointF pressPos = contentAreaPoint(mapFromGlobal(d->mousePressPos));
         const PageViewItem *pageItemPressPos = pickItemOnPoint(pressPos.x(), pressPos.y());
+
+        qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE release t=" << d->viewClock.nsecsElapsed() / 1000 << " eventPos=" << eventPos.x() << "," << eventPos.y() << " pressPos=" << int(pressPos.x()) << "," << int(pressPos.y())
+                                            << " item=" << (pageItem ? pageItem->pageNumber() : -1) << " pressItem=" << (pageItemPressPos ? pageItemPressPos->pageNumber() : -1)
+                                            << " manhattan=" << (d->mousePressPos - e->globalPosition()).manhattanLength() << " dragDist=" << QApplication::startDragDistance() << " overLink=" << (d->mouseOverLinkObject ? 1 : 0)
+                                            << " scroller=" << int(d->scroller->state());
 
         // if the mouse has not moved since the press, that's a -click-
         if (leftButton && pageItem && pageItem == pageItemPressPos && ((d->mousePressPos - e->globalPosition()).manhattanLength() < QApplication::startDragDistance())) {
@@ -3430,6 +3461,10 @@ void PageView::wheelEvent(QWheelEvent *e)
                                              << " source=" << int(e->deviceType()) << " path=" << (wholeStep ? "animated" : "instant") << " value=" << vScroll << " final=" << d->scroller->finalPosition().y()
                                              << " state=" << int(d->scroller->state());
     }
+
+    // The user is steering now; a relayout must not drag the view back to where
+    // an earlier jump was headed.
+    d->pendingJumpViewport = Okular::DocumentViewport();
 
     if ((e->modifiers() & Qt::ControlModifier) == Qt::ControlModifier) {
         // Ctrl key is pressed, perform zoom instead of scroll
@@ -4331,6 +4366,9 @@ void PageView::updateCursor(const QPoint p)
     const PageViewItem *pageItem = pickItemOnPoint(p.x(), p.y());
     QScroller::State scrollerState = d->scroller->state();
 
+    qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE hover t=" << d->viewClock.nsecsElapsed() / 1000 << " p=" << p.x() << "," << p.y() << " item=" << (pageItem ? pageItem->pageNumber() : -1) << " scroller=" << int(scrollerState)
+                                        << " visibleItems=" << d->visibleItems.count();
+
     if (d->annotator && d->annotator->active()) {
         if (pageItem || d->annotator->annotating()) {
             setCursor(d->annotator->cursor());
@@ -4380,6 +4418,7 @@ void PageView::updateCursor(const QPoint p)
         }
 
         const Okular::ObjectRect *linkobj = pageItem->page()->objectRect(Okular::ObjectRect::Action, nX, nY, pageItem->uncroppedWidth(), pageItem->uncroppedHeight());
+        qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE hoverlink t=" << d->viewClock.nsecsElapsed() / 1000 << " page=" << pageItem->pageNumber() << " nX=" << nX << " nY=" << nY << " link=" << (linkobj ? 1 : 0);
         if (linkobj) {
             d->mouseOverLinkObject = linkobj;
             d->mouseOnRect = true;
@@ -4492,11 +4531,15 @@ void PageView::scrollTo(int x, int y, bool smoothMove)
 
     d->blockPixmapsRequest = true;
 
+    const QScroller::State stateBefore = d->scroller->state();
     if (smoothMove) {
         d->scroller->scrollTo(QPoint(x, y), d->currentLongScrollDuration);
     } else {
         d->scroller->scrollTo(QPoint(x, y), 0);
     }
+    qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE scrollto t=" << d->viewClock.nsecsElapsed() / 1000 << " want=" << x << "," << y << " smooth=" << smoothMove << " dur=" << (smoothMove ? d->currentLongScrollDuration : 0)
+                                        << " stateBefore=" << int(stateBefore) << " stateAfter=" << int(d->scroller->state()) << " final=" << d->scroller->finalPosition().x() << "," << d->scroller->finalPosition().y()
+                                        << " vmax=" << verticalScrollBar()->maximum();
 
     d->blockPixmapsRequest = prevState;
 
@@ -4934,7 +4977,11 @@ void PageView::slotRelayoutPages()
     // 4) update scrollview's contents size and recenter view
     bool wasUpdatesEnabled = viewport()->updatesEnabled();
     if (fullWidth != contentAreaWidth() || fullHeight != contentAreaHeight()) {
-        const Okular::DocumentViewport vp = d->document->viewport();
+        // A jump still in the air is headed somewhere the document viewport does
+        // not name yet, so prefer its destination; see pendingJumpViewport.
+        const Okular::DocumentViewport vp = d->pendingJumpViewport.isValid() ? d->pendingJumpViewport : d->document->viewport();
+        qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE relayout t=" << d->viewClock.nsecsElapsed() / 1000 << " content=" << contentAreaWidth() << "x" << contentAreaHeight() << " -> " << fullWidth << "x" << fullHeight
+                                             << " recentreOn=" << vp.pageNumber << (d->pendingJumpViewport.isValid() ? " (pending jump)" : " (current)") << " scroller=" << int(d->scroller->state());
         // disable updates and resize the viewportContents
         if (wasUpdatesEnabled) {
             viewport()->setUpdatesEnabled(false);
@@ -5605,6 +5652,9 @@ void PageView::scrollSmoothlyBy(const QPoint delta)
     if (delta.isNull()) {
         return;
     }
+
+    // Scrolling by hand abandons any jump that was still animating.
+    d->pendingJumpViewport = Okular::DocumentViewport();
 
     // Smooth scrolling turned off, or animations disabled globally: move at once.
     if (d->currentShortScrollDuration == 0) {
