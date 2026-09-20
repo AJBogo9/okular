@@ -1525,7 +1525,25 @@ void PageView::slotRealNotifyViewportChanged(bool smoothMove)
     // relayout in "Single Pages" mode or if a relayout is pending
     d->blockPixmapsRequest = true;
     if (!getContinuousMode() || d->dirtyLayout) {
+        // A relayout can put a different page under the view, since the single
+        // page and facing modes lay out around the destination. What the reader
+        // was looking at is then gone, so an animation would carry nothing over
+        // and the move is a cut however short it measures.
+        //
+        // An empty list is not that case: it means visibility has not been
+        // computed yet, which is the window notifySetup leaves behind when it
+        // clears the items and queues the relayout. Ignorance is not absence, so
+        // leave the move alone there.
+        const bool visibilityKnown = !d->visibleItems.isEmpty();
+        bool destinationOnScreen = false;
+        for (const PageViewItem *visibleItem : std::as_const(d->visibleItems)) {
+            if (visibleItem->pageNumber() == vp.pageNumber) {
+                destinationOnScreen = true;
+                break;
+            }
+        }
         slotRelayoutPages();
+        smoothMove = smoothMove && (!visibilityKnown || destinationOnScreen);
     }
 
     // restore viewport center or use default {x-center,v-top} alignment
@@ -4532,14 +4550,29 @@ void PageView::scrollTo(int x, int y, bool smoothMove)
     d->blockPixmapsRequest = true;
 
     const QScroller::State stateBefore = d->scroller->state();
+    const bool smoothRequested = smoothMove;
+
+    // Where the view is, or is already headed if a move is in the air.
+    const QPoint from = (stateBefore == QScroller::Scrolling) ? d->scroller->finalPosition().toPoint() : QPoint(horizontalScrollBar()->value(), verticalScrollBar()->value());
+    // The scroller clamps its target, so ask where the view can actually land.
+    const QPoint to(qBound(horizontalScrollBar()->minimum(), x, horizontalScrollBar()->maximum()), qBound(verticalScrollBar()->minimum(), y, verticalScrollBar()->maximum()));
+
+    // Animate only a move that leaves part of the current view on screen. Then
+    // the motion is content the reader can follow, and it says which way and how
+    // far the view went. A jump to somewhere else in the document shares nothing
+    // with what was on screen: there the animation shows a couple of hundred
+    // milliseconds of streaking, and it delays the destination twice over, once
+    // for its own duration and again because the pages passed over on the way are
+    // what the rasteriser is asked for while it lasts.
     if (smoothMove) {
-        d->scroller->scrollTo(QPoint(x, y), d->currentLongScrollDuration);
-    } else {
-        d->scroller->scrollTo(QPoint(x, y), 0);
+        smoothMove = qAbs(to.x() - from.x()) < viewport()->width() && qAbs(to.y() - from.y()) < viewport()->height();
     }
-    qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE scrollto t=" << d->viewClock.nsecsElapsed() / 1000 << " want=" << x << "," << y << " smooth=" << smoothMove << " dur=" << (smoothMove ? d->currentLongScrollDuration : 0)
-                                        << " stateBefore=" << int(stateBefore) << " stateAfter=" << int(d->scroller->state()) << " final=" << d->scroller->finalPosition().x() << "," << d->scroller->finalPosition().y()
-                                        << " vmax=" << verticalScrollBar()->maximum();
+
+    d->scroller->scrollTo(QPoint(x, y), smoothMove ? d->currentLongScrollDuration : 0);
+    qCDebug(OkularScrollTrace).nospace() << "SCROLLTRACE scrollto t=" << d->viewClock.nsecsElapsed() / 1000 << " want=" << x << "," << y << " req=" << smoothRequested << " smooth=" << smoothMove
+                                        << " dur=" << (smoothMove ? d->currentLongScrollDuration : 0) << " from=" << from.x() << "," << from.y() << " to=" << to.x() << "," << to.y() << " vp=" << viewport()->width() << "x"
+                                        << viewport()->height() << " stateBefore=" << int(stateBefore) << " stateAfter=" << int(d->scroller->state()) << " final=" << d->scroller->finalPosition().x() << ","
+                                        << d->scroller->finalPosition().y() << " vmax=" << verticalScrollBar()->maximum();
 
     d->blockPixmapsRequest = prevState;
 
