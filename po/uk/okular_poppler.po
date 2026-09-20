@@ -9,8 +9,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: okular_poppler\n"
 "Report-Msgid-Bugs-To: https://bugs.kde.org\n"
-"POT-Creation-Date: 2026-09-03 00:41+0000\n"
-"PO-Revision-Date: 2026-08-18 13:52+0300\n"
+"POT-Creation-Date: 2026-09-20 12:51+0000\n"
+"PO-Revision-Date: 2026-09-20 19:09+0300\n"
 "Last-Translator: Yuri Chornoivan <yurchor@ukr.net>\n"
 "Language-Team: Ukrainian <trans-uk@lists.fedoraproject.org>\n"
 "Language: uk\n"
@@ -407,6 +407,8 @@ msgstr ""
 
 #: pdfsignatureutils.cpp:236
 #, kde-format
+msgctxt ""
+"%1 is the thing to open (hardware or software token, certificate DB,...)"
 msgid "Enter password to open: %1"
 msgstr "Введіть пароль для відкриття %1"
 

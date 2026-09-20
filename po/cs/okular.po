@@ -11,7 +11,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: okular\n"
 "Report-Msgid-Bugs-To: https://bugs.kde.org\n"
-"POT-Creation-Date: 2026-09-09 00:44+0000\n"
+"POT-Creation-Date: 2026-09-20 12:51+0000\n"
 "PO-Revision-Date: 2026-09-02 01:23+0200\n"
 "Last-Translator: Libor Filipek <libor.filipek@gmail.com>\n"
 "Language-Team: Czech <kde-i18n-doc@kde.org>\n"
@@ -598,7 +598,15 @@ msgstr "Tuto zprávu již nezobrazovat"
 msgid "Not Available"
 msgstr "Nedostupný"
 
-#: core/signatureutils.cpp:510
+#: core/signatureutils.cpp:508
+#, kde-format
+msgctxt "signing error"
+msgid ""
+"Signing certificate not found. If you are using a smartcard, it might have "
+"been removed or the signature store changed"
+msgstr ""
+
+#: core/signatureutils.cpp:511
 #, kde-format
 msgctxt "%1 is a error code"
 msgid ""
@@ -608,23 +616,23 @@ msgstr ""
 "Interní chyba podepisování. Nahlaste prosím chybu s postupem pro její "
 "reprodukci. Kód chyby %1"
 
-#: core/signatureutils.cpp:512
+#: core/signatureutils.cpp:513
 #, kde-kuit-format
 msgctxt "%1 is a filename with path"
 msgid "Could not sign the document: <filename>%1</filename>"
 msgstr "Nepodařilo se podepsat dokument: <filename>%1</filename>"
 
-#: core/signatureutils.cpp:514
+#: core/signatureutils.cpp:515
 #, kde-format
 msgid "Signing cancelled by user"
 msgstr "Podpis zrušen uživatelem"
 
-#: core/signatureutils.cpp:516
+#: core/signatureutils.cpp:517
 #, kde-format
 msgid "Signing failed: Wrong passphrase"
 msgstr "Přihlášení se nezdařilo: Špatné heslo"
 
-#: core/signatureutils.cpp:518
+#: core/signatureutils.cpp:519
 #, kde-kuit-format
 msgctxt "%1 is a filename with path"
 msgid ""
@@ -634,7 +642,7 @@ msgstr ""
 "Podepsaný dokument se nepodařilo zapsat do složky <filename>%1</filename>. "
 "Ujistěte se prosím, že jste vybrali složku s oprávněním k zápisu."
 
-#: core/signatureutils.cpp:520
+#: core/signatureutils.cpp:521
 #, kde-format
 msgid "Unknown signing error"
 msgstr "Neznámá chyba při podepisování"
@@ -3651,7 +3659,7 @@ msgctxt "Digital signature"
 msgid "Signature placeholder (Click to Sign)"
 msgstr "Místo pro podpis (klikněte pro podpis)"
 
-#: part/formwidgets.cpp:1350 part/signaturepanel.cpp:95
+#: part/formwidgets.cpp:1350 part/signaturepanel.cpp:97
 #, kde-format
 msgid "&Sign…"
 msgstr "&Podepsat..."
@@ -3973,22 +3981,22 @@ msgstr "Kopírovat text"
 msgid "Go to '%1'"
 msgstr "Jít na %1'"
 
-#: part/pageview.cpp:4205 part/part.cpp:3218
+#: part/pageview.cpp:4207 part/part.cpp:3218
 #, kde-format
 msgid "Fit Width"
 msgstr "Přizpůsobit šířce"
 
-#: part/pageview.cpp:4205
+#: part/pageview.cpp:4207
 #, kde-format
 msgid "Fit Page"
 msgstr "Přizpůsobit straně"
 
-#: part/pageview.cpp:4205
+#: part/pageview.cpp:4207
 #, kde-format
 msgid "Auto Fit"
 msgstr "Automaticky vyplnit"
 
-#: part/pageview.cpp:4228
+#: part/pageview.cpp:4230
 #, kde-format
 msgctxt ""
 "Zoom percentage value %1 will be replaced by the actual zoom factor value, "
@@ -3997,68 +4005,68 @@ msgctxt ""
 msgid "%1%"
 msgstr "%1%"
 
-#: part/pageview.cpp:4511
+#: part/pageview.cpp:4513
 #, kde-format
 msgid "Search for '%1' with"
 msgstr "Vyhledat '%1' pomocí"
 
-#: part/pageview.cpp:4525
+#: part/pageview.cpp:4527
 #, kde-format
 msgid "Configure Web Shortcuts…"
 msgstr "Nastavit webové odkazy..."
 
-#: part/pageview.cpp:4551
+#: part/pageview.cpp:4553
 #, kde-format
 msgid "Follow This Link"
 msgstr "Následovat tento odkaz"
 
-#: part/pageview.cpp:4554
+#: part/pageview.cpp:4556
 #, kde-format
 msgid "Play this Sound"
 msgstr "Přehrát tento zvuk"
 
-#: part/pageview.cpp:4556
+#: part/pageview.cpp:4558
 #, kde-format
 msgid "Stop Sound"
 msgstr "Zastavit zvuk"
 
-#: part/pageview.cpp:4562
+#: part/pageview.cpp:4564
 #, kde-format
 msgid "Copy Link Address"
 msgstr "Kopírovat adresu odkazu"
 
-#: part/pageview.cpp:4619
+#: part/pageview.cpp:4621
 #, kde-format
 msgid "Search for '%1' in this document"
 msgstr "Vyhledat „%1“ v tomto dokumentu"
 
-#: part/pageview.cpp:5151
+#: part/pageview.cpp:5153
 #, kde-format
 msgid "Welcome"
 msgstr "Vítejte"
 
-#: part/pageview.cpp:5277
+#: part/pageview.cpp:5279
 #, kde-format
 msgid "Select zooming area. Right-click to zoom out."
 msgstr "Vyberte oblast pro zvětšení. Pravým kliknutím oddálíte."
 
-#: part/pageview.cpp:5292
+#: part/pageview.cpp:5294
 #, kde-format
 msgid "Click to see the magnified view."
 msgstr "Kliknutím zobrazíte zvětšený pohled"
 
-#: part/pageview.cpp:5309
+#: part/pageview.cpp:5311
 #, kde-format
 msgid "Draw a rectangle around the text/graphics to copy."
 msgstr ""
 "Nakreslete obdélník okolo textu nebo obrázku, který si přejete zkopírovat."
 
-#: part/pageview.cpp:5325
+#: part/pageview.cpp:5327
 #, kde-format
 msgid "Select text"
 msgstr "Vybrat text"
 
-#: part/pageview.cpp:5341
+#: part/pageview.cpp:5343
 #, kde-format
 msgid ""
 "Draw a rectangle around the table, then click near edges to divide up; press "
@@ -4067,7 +4075,7 @@ msgstr ""
 "Nakreslete obdélník okolo tabulky, poté klikněte na okraje pro rozdělení; "
 "stiskem Esc zrušíte výběr."
 
-#: part/pageview.cpp:5356 part/pageview.cpp:5364
+#: part/pageview.cpp:5358 part/pageview.cpp:5366
 #, kde-format
 msgid ""
 "All your signing certificates are invalid. In case signing worked before, "
@@ -4076,17 +4084,17 @@ msgstr ""
 "Všechny vaše podpisové certifikáty jsou neplatné. Pokud podpis dříve "
 "fungoval, zkontrolujte prosím jejich platnost."
 
-#: part/pageview.cpp:5357
+#: part/pageview.cpp:5359
 #, kde-format
 msgid "No valid certificates"
 msgstr "Žádné platné certifikáty"
 
-#: part/pageview.cpp:5358 part/pageview.cpp:5373
+#: part/pageview.cpp:5360 part/pageview.cpp:5375
 #, kde-format
 msgid "Open Certificate Manager"
 msgstr "Otevřít správce certifikátů"
 
-#: part/pageview.cpp:5369
+#: part/pageview.cpp:5371
 #, kde-format
 msgid ""
 "There are no available signing certificates.<br/>Launch Certificate Manager "
@@ -4097,12 +4105,12 @@ msgstr ""
 "certifikátů a importujte nebo spravujte certifikáty<br/>Další informace "
 "naleznete v části <a href=\"%1\">Přidání digitálních podpisů</a> v příručce."
 
-#: part/pageview.cpp:5372 part/pageview.cpp:5384
+#: part/pageview.cpp:5374 part/pageview.cpp:5386
 #, kde-format
 msgid "No certificates found"
 msgstr "Nebyly nalezeny žádné certifikáty"
 
-#: part/pageview.cpp:5382
+#: part/pageview.cpp:5384
 #, kde-format
 msgid ""
 "There are no available signing certificates.<br/>For more information, "
@@ -4112,17 +4120,17 @@ msgstr ""
 "Nejsou k dispozici žádné podpisové certifikáty.<br/>Další informace "
 "naleznete v části <a href=\"%1\">Přidání digitálních podpisů</a> v příručce."
 
-#: part/pageview.cpp:5407
+#: part/pageview.cpp:5409
 #, kde-format
 msgid "You have unsaved changes. Please save the document before signing it."
 msgstr "Máte neuložené změny. Před podpisem dokument uložte."
 
-#: part/pageview.cpp:5430
+#: part/pageview.cpp:5432
 #, kde-format
 msgid "Draw a rectangle to insert the signature field"
 msgstr "Nakreslete obdélník pro vložení pole podpisu."
 
-#: part/pageview.cpp:5580
+#: part/pageview.cpp:5582
 #, kde-format
 msgid "Draw a rectangle around the page area you wish to keep visible"
 msgstr ""
@@ -5666,7 +5674,7 @@ msgstr "Rozbalit všechny prvky"
 msgid "Collapse all elements"
 msgstr "Sbalit všechny prvky"
 
-#: part/signaturepanel.cpp:99
+#: part/signaturepanel.cpp:101
 #, kde-format
 msgid "Properties"
 msgstr "Vlastnosti"

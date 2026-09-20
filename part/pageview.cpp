@@ -4093,6 +4093,8 @@ static double parseZoomString(QString z)
     // kdelibs4 sometimes adds accelerators to actions' text directly :(
     z.remove(QLatin1Char('&'));
     z.remove(QLatin1Char('%'));
+    // \u066A - Arabic Percent Sign
+    z.remove(QChar(u'٪'));
     return QLocale().toDouble(z) / 100.0;
 }
 
@@ -5899,7 +5901,7 @@ PageView::FinishSigningResult PageView::finishSigning()
         return Success;
     }
     case Okular::FieldAlreadySigned: // We should not end up here
-    case Okular::KeyMissing:         // unless the user modified the key store after opening the dialog, this should not happen
+    case Okular::KeyMissing:
     case Okular::InternalSigningError:
         KMessageBox::detailedError(this, errorString(result.first, static_cast<int>(result.first)), result.second);
         return Failed;
